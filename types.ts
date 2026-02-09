@@ -1,0 +1,48 @@
+
+export interface GpsLocation {
+  lat: number;
+  lon: number;
+  accuracy: number;
+}
+
+export interface PlantEntry {
+  id: string;
+  tanggal: string;
+  timestamp: string;
+  gps?: GpsLocation;
+  lokasi: string;
+  pekerjaan: string;
+  tinggi: number;
+  koordinat: string;
+  y: number; // Mapping: Longitude (as per user snippet)
+  x: number; // Mapping: Latitude (as per user snippet)
+  tanaman: string;
+  tahunTanam: number;
+  pengawas: string;
+  vendor: string;
+  tim: string;
+  kesehatan: 'Sehat' | 'Merana' | 'Mati';
+  foto: string; // base64
+  uploaded?: boolean;
+  noPohon: number;
+  description?: string;
+  linkDrive?: string;
+  statusDuplikat?: string;
+  statusVerifikasi?: string;
+}
+
+export interface FormState {
+  tinggi: number;
+  tahunTanam: number;
+  jenis: string;
+  pekerjaan: string;
+  pengawas: string;
+  vendor: string;
+  tim: string;
+  kesehatan: 'Sehat' | 'Merana' | 'Mati';
+}
+
+export interface ToastState {
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
