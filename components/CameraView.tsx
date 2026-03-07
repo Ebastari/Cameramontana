@@ -4,6 +4,7 @@ import { getCameraDevices, startCamera } from '../services/cameraService';
 import { GpsLocation, FormState } from '../types';
 import { Compass } from './Compass';
 import { InfoOverlay } from './InfoOverlay';
+import { analyzePlantHealthHSV, type PlantHealthResult } from '../ecology/plantHealth';
 
 interface CameraViewProps {
   onCapture: (dataUrl: string) => void;
@@ -73,6 +74,7 @@ const IconCamera = () => (
 export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, onFormStateChange, entriesCount, pendingCount, isSyncing, lastSyncAt, gps, onGpsUpdate, onShowSheet, showToast, isOnline }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const shutterSoundRef = useRef<HTMLAudioElement>(null);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -80,6 +82,7 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
   const [cameraLoading, setCameraLoading] = useState(true);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [needsUserAction, setNeedsUserAction] = useState(false);
+  const [livePlantHealth, setLivePlantHealth] = useState<PlantHealthResult | null>(null);
   
   const progressPercentage = useMemo(() => Math.min(100, (entriesCount / DAILY_TARGET) * 100), [entriesCount]);
 
@@ -220,6 +223,53 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
     onCapture(canvas.toDataURL('image/jpeg', 0.85));
   }, [onCapture, formState, gps, entriesCount, showToast]);
 
+  useEffect(() => {
+    let timerId: number | null = null;
+    const video = videoRef.current;
+    if (!video || cameraLoading || cameraError || needsUserAction) {
+      setLivePlantHealth(null);
+      return;
+    }
+
+    if (!analysisCanvasRef.current) {
+      analysisCanvasRef.current = document.createElement('canvas');
+    }
+
+    const tick = () => {
+      const v = videoRef.current;
+      if (!v || v.videoWidth === 0 || v.videoHeight === 0 || v.readyState < 2) {
+        return;
+      }
+
+      try {
+        const canvas = analysisCanvasRef.current as HTMLCanvasElement;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        if (!context) {
+          return;
+        }
+
+        const size = 160;
+        canvas.width = size;
+        canvas.height = size;
+        context.drawImage(v, 0, 0, size, size);
+        const imageData = context.getImageData(0, 0, size, size);
+        const result = analyzePlantHealthHSV(imageData);
+        setLivePlantHealth(result);
+      } catch {
+        // Abaikan frame error sesaat saat stream berubah.
+      }
+    };
+
+    tick();
+    timerId = window.setInterval(tick, 1500);
+
+    return () => {
+      if (timerId !== null) {
+        window.clearInterval(timerId);
+      }
+    };
+  }, [cameraLoading, cameraError, needsUserAction, currentDeviceId]);
+
   return (
     <div className="relative w-screen h-[100dvh] min-h-[100dvh] bg-black overflow-hidden flex items-center justify-center">
       <video 
@@ -317,10 +367,27 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
                <span className="text-[7px] font-black text-red-200 uppercase tracking-widest">GPS SEARCHING...</span>
              </div>
            )}
+
+           {livePlantHealth && (
+             <div className="bg-black/35 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10 flex items-center gap-2">
+               <span
+                 className={`text-[7px] font-black uppercase tracking-widest ${
+                   livePlantHealth.health === 'Sehat'
+                     ? 'text-emerald-300'
+                     : livePlantHealth.health === 'Merana'
+                       ? 'text-amber-300'
+                       : 'text-red-300'
+                 }`}
+               >
+                 AI: {livePlantHealth.health}
+               </span>
+               <span className="text-[7px] font-bold text-white/70">{livePlantHealth.confidence}%</span>
+             </div>
+           )}
         </div>
       </div>
 
-      <InfoOverlay formState={formState} entriesCount={entriesCount} gps={gps} />
+      <InfoOverlay formState={formState} entriesCount={entriesCount} gps={gps} liveHealth={livePlantHealth} />
       
       <div className="absolute bottom-0 left-0 right-0 z-40 safe-bottom">
         <div className="mx-3 sm:mx-4 mb-3 sm:mb-6 space-y-3 sm:space-y-4">

@@ -2,15 +2,17 @@
 import React, { useRef } from 'react';
 import Draggable from 'react-draggable';
 import { GpsLocation, FormState } from '../types';
+import type { PlantHealthResult } from '../ecology/plantHealth';
 
 interface InfoOverlayProps {
   // FIX: Use FormState type from types.ts to ensure compatibility with props passed from CameraView.
   formState: FormState;
   entriesCount: number;
   gps: GpsLocation | null;
+  liveHealth?: PlantHealthResult | null;
 }
 
-export const InfoOverlay: React.FC<InfoOverlayProps> = ({ formState, entriesCount, gps }) => {
+export const InfoOverlay: React.FC<InfoOverlayProps> = ({ formState, entriesCount, gps, liveHealth }) => {
   const nodeRef = useRef(null);
 
   const isPoorAccuracy = gps ? gps.accuracy > 30 : false;
@@ -57,6 +59,22 @@ export const InfoOverlay: React.FC<InfoOverlayProps> = ({ formState, entriesCoun
               <span className="text-[8px] font-black text-white/40 uppercase">Precision</span>
               <span className={`text-[10px] font-bold transition-colors duration-300 ${gps.accuracy <= 10 ? 'text-green-400' : gps.accuracy <= 30 ? 'text-yellow-400' : 'text-red-400 animate-pulse'}`}>
                 ±{gps.accuracy.toFixed(1)}m
+              </span>
+            </div>
+          )}
+          {liveHealth && (
+            <div className="flex justify-between items-center gap-4">
+              <span className="text-[8px] font-black text-white/40 uppercase">Health AI</span>
+              <span
+                className={`text-[10px] font-bold ${
+                  liveHealth.health === 'Sehat'
+                    ? 'text-emerald-400'
+                    : liveHealth.health === 'Merana'
+                      ? 'text-yellow-400'
+                      : 'text-red-400'
+                }`}
+              >
+                {liveHealth.health} ({liveHealth.confidence}%)
               </span>
             </div>
           )}

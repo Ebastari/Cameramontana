@@ -4,6 +4,8 @@ export interface GPSRecord {
 
 export interface GPSQuality {
   medianAccuracy: number;
+  p90Accuracy: number;
+  sampleCount: number;
   quality: 'Tinggi' | 'Sedang' | 'Rendah';
 }
 
@@ -34,16 +36,29 @@ export const analyzeGPSAccuracy = (records: GPSRecord[]): GPSQuality => {
   if (sorted.length === 0) {
     return {
       medianAccuracy: 0,
+      p90Accuracy: 0,
+      sampleCount: 0,
       quality: 'Rendah',
     };
   }
 
-  const mid = Math.floor(sorted.length / 2);
+  const q1 = sorted[Math.floor((sorted.length - 1) * 0.25)];
+  const q3 = sorted[Math.floor((sorted.length - 1) * 0.75)];
+  const iqr = Math.max(0, q3 - q1);
+  const upperBound = q3 + 1.5 * iqr;
+  const filtered = sorted.filter((value) => value <= upperBound);
+  const source = filtered.length > 0 ? filtered : sorted;
+
+  const mid = Math.floor(source.length / 2);
   const medianAccuracy =
-    sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+    source.length % 2 === 0 ? (source[mid - 1] + source[mid]) / 2 : source[mid];
+  const p90Idx = Math.min(source.length - 1, Math.floor((source.length - 1) * 0.9));
+  const p90Accuracy = source[p90Idx];
 
   return {
     medianAccuracy: round(medianAccuracy),
+    p90Accuracy: round(p90Accuracy),
+    sampleCount: source.length,
     quality: classifyGPS(medianAccuracy),
   };
 };

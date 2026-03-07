@@ -36,6 +36,37 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({ entries, appsScriptU
     loadCloudData();
   }, [appsScriptUrl, isOnline]);
 
+  const parseNumber = (value: unknown): number => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+
+    const raw = String(value ?? '').trim();
+    if (!raw) {
+      return 0;
+    }
+
+    const normalized = raw.replace(',', '.').replace(/[^0-9.\-]+/g, '');
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const normalizeHealth = (value: unknown): PlantEntry['kesehatan'] => {
+    const raw = String(value ?? '').trim().toLowerCase();
+
+    if (raw.includes('baik') || raw === 'sehat' || raw.includes('level 4')) {
+      return 'Sehat';
+    }
+    if (raw.includes('merana') || raw.includes('level 2')) {
+      return 'Merana';
+    }
+    if (raw.includes('mati') || raw.includes('level 1')) {
+      return 'Mati';
+    }
+
+    return 'Sehat';
+  };
+
   // Gabungkan data lokal dan cloud, hindari duplikat berdasarkan ID
   const mergedData = useMemo(() => {
     const map = new Map();
@@ -50,25 +81,25 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({ entries, appsScriptU
       let hasGps = false;
 
       if (item.X !== undefined && item.X !== null && item.Y !== undefined && item.Y !== null) {
-        const xStr = String(item.X).replace(',', '.');
-        const yStr = String(item.Y).replace(',', '.');
-        lat = parseFloat(xStr);
-        lon = parseFloat(yStr);
+        lat = parseNumber(item.X);
+        lon = parseNumber(item.Y);
         if (!isNaN(lat) && !isNaN(lon)) {
           hasGps = true;
         }
       }
 
+      const gpsAccuracy = parseNumber(item.GPS_Accuracy_M ?? item.Akurasi ?? item.Accuracy);
+
       const entry: Partial<PlantEntry> = {
         id: String(item.ID),
         noPohon: parseInt(item["No Pohon"]) || 0,
         tanaman: item.Tanaman || 'Unknown',
-        tinggi: parseFloat(String(item.Tinggi).replace(',', '.')) || 0,
-        kesehatan: (item.Kesehatan || 'Sehat') as any,
+        tinggi: parseNumber(item.Tinggi),
+        kesehatan: normalizeHealth(item.Kesehatan),
         pengawas: item.Pengawas || 'N/A',
         tanggal: item.Tanggal || '-',
         foto: item["Link Drive"] || '', // Gunakan link drive untuk cloud
-        gps: hasGps ? { lat, lon, accuracy: 0 } : undefined
+        gps: hasGps ? { lat, lon, accuracy: gpsAccuracy > 0 ? gpsAccuracy : 0 } : undefined
       };
       map.set(String(item.ID), entry);
     });
