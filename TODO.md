@@ -1,36 +1,38 @@
-# TODO - AI Height Display Feature
+# Fix OpenCV Loading & Plant Detection Issues
 
-## Task: Display AI Height Estimation with Color Indicator
+## Current Problem
+- \"⚠️ OpenCV belum dimuat (perlu internet)\" - OpenCV.js CDN fails to load.
+- Poor mask quality (no green segmentation), bad pixelToCmRatio, interval/state issues.
 
-### Objective
-When AI height mode is active, display the estimated height from sample data with:
-- Small font size
-- Green color when active
-- Red color when not active
-- Format: "AI Tinggi : XX cm"
+## Steps (Track progress by editing this file)
 
-### Implementation Plan
+### 1. [x] Enhance OpenCV loader (ecology/plantDetection.ts)
+   - Add console.log('[OpenCV] Load attempt X/3...', success/error/timeout.
+   - Lighting check: Avg V from HSV, skip if <0.3, log.
+   - Logs: Contours, maxArea, final height/ratio/bbox, brightness.
+   - Interface: avgBrightnessV in result.
 
-1. **Modify components/CameraView.tsx**
-   - Add a new status indicator in the status indicators area (top-right panel)
-   - Display "AI Tinggi : XX cm" with green background when `isHeightAiMode` is true
-   - Display "AI Tinggi : ---" with red background when `isHeightAiMode` is false
-   - Use small font size (text-[7px] or similar)
-   - Show the estimated height from `heightAiEstimate.cm` when available
+### 2. [ ] Update CameraView.tsx AI analysis
+   - Console logs: OpenCV status, detection result, ratio, lighting.
+   - Better error handling: Distinguish network/no-plant/low-light.
+   - Fix pixelToCmRatio calibration for 160px input.
+   - Ensure interval runs, state updates immediately.
 
-2. **Remove "ke titik target" text**
-   - Removed the text "ke titik target" from the distance indicator in grid overlay
+### 3. [ ] Add user notifications/overlays
+   - Toast/error banner for OpenCV load fail.
+   - Overlay hints: \"No plant detected - adjust position/lighting\".
+   - Debug info in top panel: contours, ratio, lighting.
 
-### Changes made in CameraView.tsx:
-- Added new indicator showing AI height status with color coding:
-  - Green (emerald) when active with estimated height
-  - Amber when measuring
-  - Red when inactive
-- Removed "ke titik target" text from distance display
+### 4. [ ] Test & validate
+   - npm run dev
+   - Enable AI mode + debug
+   - Check console/network tab (OpenCV.js status).
+   - Test with plant: Good mask? Accurate height?
 
-### Status
-- [x] Read and understand existing code
-- [x] Identify location for new indicator
-- [x] Implement the AI height display with color coding
-- [x] Remove "ke titik target" text from panel
+### 5. [ ] Optional enhancements
+   - HSV tuning sliders in debug mode.
+   - Self-host opencv.js in public/ if CDN unreliable.
+   - Profile interval FPS (target 60s -> 0.67Hz).
+
+**Progress:** 0/5 complete
 

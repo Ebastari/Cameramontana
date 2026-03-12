@@ -1,4 +1,3 @@
-
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 // ...existing code...
 import { getCameraDevices, startCamera } from '../services/cameraService';
@@ -6,7 +5,7 @@ import { GpsLocation, FormState } from '../types';
 import { Compass } from './Compass';
 import { LiveHealthComment } from './LiveHealthComment';
 import { analyzePlantHealthHSV, type PlantHealthResult } from '../ecology/plantHealth';
-import { detectPlantHeightOpenCV, loadOpenCV } from '../ecology/plantDetection';
+import { detectPlantHeightOpenCV, type PlantHeightDetectionResult, loadOpenCV, calibratePixelToCmRatio, OpenCVLoadState, isOpenCVReady } from '../ecology/plantDetection';
 import { detectPlantsRealtime, pixelsToCentimeters, DEFAULT_VEGETATION_HSV, type DetectedPlant } from '../ecology/plantDetectionModule';
 import { PlantDetectionOverlay } from './PlantDetectionOverlay';
 import { 
@@ -19,6 +18,12 @@ import {
   gridPointToGps,
   DEFAULT_CAPTURE_THRESHOLD_M 
 } from '../services/gridService';
+import HeightAiDetection from './height/HeightAiDetection';
+import HeightSliderControl from './height/HeightSliderControl';
+import HeightPixelScale from './height/HeightPixelScale';
+import HeightSettingsCard, { type HeightMode } from './height/HeightSettingsCard';
+
+const HEIGHT_MODE_KEY = 'camera-montana-height-mode-v1';
 
 interface HeightAiEstimate {
   cm: number;
@@ -143,7 +148,7 @@ const DAILY_TARGET = 50;
 const BRAND_NAME = "PT ENERGI BATUBARA LESTARI";
 const MAX_THUMBNAIL_SIZE = 320;
 
-const SHUTTER_SOUND_BASE64 = "data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU92T18AZm9vYmFyYmF6cXV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4";
+const SHUTTER_SOUND_BASE64 = "data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU92T18AZm9vYmFyYmF6cXV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4";
 
 const IconPanel = () => (
   <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -210,8 +215,103 @@ export const CameraView: React.FC<CameraViewProps> = ({
 }) => {
   // Semua deklarasi state harus di sini, sebelum useEffect
   const [showGridOverlay, setShowGridOverlay] = useState(false);
-  // State untuk mode AI harus dideklarasikan sebelum isManualHeightMode
-  const [isHeightAiMode, setIsHeightAiMode] = useState(false);
+  // Height mode state - reads from settings
+  const [heightMode, setHeightMode] = useState<HeightMode>(() => {
+    try {
+      const saved = window.localStorage.getItem(HEIGHT_MODE_KEY);
+      if (saved === 'ai' || saved === 'slider' || saved === 'pixel-scale') {
+        return saved as HeightMode;
+      }
+    } catch {}
+    return 'slider'; // Default to slider mode
+  });
+
+  // Listen for height mode changes from settings (when user changes in SettingsTab while app is running)
+  // Note: storage event only fires for OTHER tabs, so we also check on focus
+  useEffect(() => {
+    const checkHeightMode = () => {
+      try {
+        const saved = window.localStorage.getItem(HEIGHT_MODE_KEY);
+        if (saved === 'ai' || saved === 'slider' || saved === 'pixel-scale') {
+          setHeightMode(saved as HeightMode);
+        }
+      } catch {}
+    };
+    
+    // Check on mount and on focus
+    checkHeightMode();
+    window.addEventListener('focus', checkHeightMode);
+    
+    // Also listen for storage changes from other tabs
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === HEIGHT_MODE_KEY && e.newValue) {
+        if (e.newValue === 'ai' || e.newValue === 'slider' || e.newValue === 'pixel-scale') {
+          setHeightMode(e.newValue as HeightMode);
+        }
+      }
+      // Listen for pixel scale settings changes
+      if (e.key === 'pixel-scale-stick-height' && e.newValue) {
+        const parsed = parseFloat(e.newValue);
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 5) {
+          setStickHeightMeters(parsed);
+        }
+      }
+      if (e.key === 'pixel-scale-line-offset' && e.newValue) {
+        const parsed = parseFloat(e.newValue);
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 50) {
+          setLineOffsetPercent(parsed);
+        }
+      }
+      if (e.key === 'pixel-scale-line-position' && e.newValue) {
+        const parsed = parseFloat(e.newValue);
+        if (!isNaN(parsed) && parsed > 10 && parsed <= 90) {
+          setLinePositionPercent(parsed);
+        }
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    
+    return () => {
+      window.removeEventListener('focus', checkHeightMode);
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, []);
+
+  // Derive isHeightAiMode and isMeasureMode from heightMode
+  // Always read from localStorage to ensure sync with settings
+  const getCurrentMode = useCallback((): HeightMode => {
+    try {
+      const saved = window.localStorage.getItem(HEIGHT_MODE_KEY);
+      if (saved === 'ai' || saved === 'slider' || saved === 'pixel-scale') {
+        return saved as HeightMode;
+      }
+    } catch {}
+    return heightMode;
+  }, [heightMode]);
+  
+  const isHeightAiMode = getCurrentMode() === 'ai';
+  const isMeasureMode = getCurrentMode() === 'pixel-scale';
+  
+  // Show/hide measurement overlay (for pixel scale mode) - default to shown for better UX
+  // Sync with localStorage for persistence
+  const [showMeasureOverlay, setShowMeasureOverlay] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pixel-scale-show-overlay');
+      return saved !== 'false'; // Default to true
+    } catch {
+      return true;
+    }
+  });
+
+  // Persist showMeasureOverlay to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('pixel-scale-show-overlay', showMeasureOverlay.toString());
+    } catch {}
+  }, [showMeasureOverlay]);
+  
+  // Height controls collapsed state
+  const [heightControlsCollapsed, setHeightControlsCollapsed] = useState(false);
   // Mode pengambilan titik manual aktif jika mode AI nonaktif
   const isManualHeightMode = !isHeightAiMode;
   const [sampleIndicator, setSampleIndicator] = useState<number | null>(null);
@@ -247,16 +347,72 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
   });
 
+// Height AI Debug
+  const [showHeightDebug, setShowHeightDebug] = useState(() => {
+    try {
+      return localStorage.getItem('camera-height-debug') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [heightDebugResult, setHeightDebugResult] = useState<PlantHeightDetectionResult | null>(null);
+  const debugCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // NEW: AI Detection Error States
+  const [opencvLoadError, setOpencvLoadError] = useState(false);
+  const [detectionFailureReason, setDetectionFailureReason] = useState<'opencv' | 'noplan' | 'lowlight' | 'network' | 'unknown' | null>(null);
+
+  // Update localStorage when toggle changes
+  useEffect(() => {
+    try {
+      localStorage.setItem('camera-height-debug', showHeightDebug.toString());
+    } catch {}
+  }, [showHeightDebug]);
+
   // NEW: Manual Height Measurement Mode
-  const [isMeasureMode, setIsMeasureMode] = useState(false);
+  // Note: isMeasureMode is now derived from heightMode (see above)
   const [measurePoints, setMeasurePoints] = useState<MeasurePoint[]>([]);
   const [stickHeightMeters, setStickHeightMeters] = useState(2); // Default 2 meters
   const [lineOffsetPercent, setLineOffsetPercent] = useState(15); // Default 15%
+  const [linePositionPercent, setLinePositionPercent] = useState(50); // Center position for reference lines
   const [measuredHeightCm, setMeasuredHeightCm] = useState<number | null>(null);
   const [measureGuideText, setMeasureGuideText] = useState('');
+  const [draggingPoint, setDraggingPoint] = useState<number | null>(null);
+  const [hasSeenGuide, setHasSeenGuide] = useState(false); // Track if user has seen guide
+  const [showCaptureAnalysis, setShowCaptureAnalysis] = useState(false); // Show analysis only on capture
+  const [draggingLine, setDraggingLine] = useState<number | null>(null);
   
   // Canvas ref for measurement overlay
   const measureCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Sync stick height and line offset from HeightPixelScale settings
+  useEffect(() => {
+    try {
+      const savedStickHeight = localStorage.getItem('pixel-scale-stick-height');
+      if (savedStickHeight) {
+        const parsed = parseFloat(savedStickHeight);
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 5) {
+          setStickHeightMeters(parsed);
+        }
+      }
+      
+      const savedLineOffset = localStorage.getItem('pixel-scale-line-offset');
+      if (savedLineOffset) {
+        const parsed = parseFloat(savedLineOffset);
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 50) {
+          setLineOffsetPercent(parsed);
+        }
+      }
+      
+      const savedLinePosition = localStorage.getItem('pixel-scale-line-position');
+      if (savedLinePosition) {
+        const parsed = parseFloat(savedLinePosition);
+        if (!isNaN(parsed) && parsed > 10 && parsed <= 90) {
+          setLinePositionPercent(parsed);
+        }
+      }
+    } catch {}
+  }, [isMeasureMode]); // Re-read when entering measure mode
 
   // Calculate height from measurement points
   const calculateMeasureHeight = useCallback((points: MeasurePoint[], videoHeight: number) => {
@@ -273,26 +429,91 @@ export const CameraView: React.FC<CameraViewProps> = ({
   // Handle measurement mode toggle - mutually exclusive with AI mode
   const handleToggleMeasureMode = useCallback(() => {
     if (isMeasureMode) {
-      // Turn off measurement mode
-      setIsMeasureMode(false);
+      // Turn off measurement mode - switch to slider
+      setHeightMode('slider');
       setMeasurePoints([]);
       setMeasuredHeightCm(null);
       setMeasureGuideText('');
     } else {
       // Turn on measurement mode, turn off AI mode
-      setIsMeasureMode(true);
-      setIsHeightAiMode(false);
+      setHeightMode('pixel-scale');
       setHeightAiEstimate(null);
       setMeasurePoints([]);
       setMeasuredHeightCm(null);
-      setMeasureGuideText('Ketuk titik dasar pohon');
-      showToast('Mode Ukur Tinggi aktif.', 'info');
+      // Only show guide on first time
+      if (!hasSeenGuide) {
+        setMeasureGuideText('✦');
+        setHasSeenGuide(true);
+        // Show guide for 3 seconds then hide completely
+        setTimeout(() => setMeasureGuideText(''), 3000);
+      }
+      // Don't show toast - too distracting during measurement
     }
   }, [isMeasureMode, showToast]);
 
-  // Handle canvas click for measurement
-  const handleMeasureCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isMeasureMode || measurePoints.length >= 2) return;
+  // Handle canvas click for measurement - optimized for field use
+  const handleMeasureCanvasClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (!isMeasureMode) return;
+    
+    const canvas = measureCanvasRef.current;
+    if (!canvas) return;
+    
+    // Get click position relative to the canvas/video
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    // Calculate position - works anywhere on screen
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    
+    // Check if clicking on existing marker to drag it
+    const clickedPointIndex = measurePoints.findIndex(p => {
+      const dist = Math.sqrt((p.x - x) ** 2 + (p.y - y) ** 2);
+      return dist < 30; // 30px radius for easier touching
+    });
+    
+    if (clickedPointIndex >= 0) {
+      // Start dragging existing point
+      setDraggingPoint(clickedPointIndex);
+      return;
+    }
+    
+    // If we already have 2 points and not dragging, don't add more
+    if (measurePoints.length >= 2) return;
+    
+    const newPoints = [...measurePoints, { x, y }];
+    setMeasurePoints(newPoints);
+    
+    // Haptic feedback if available
+    if (navigator.vibrate) {
+      navigator.vibrate(50);
+    }
+    
+    if (newPoints.length === 1) {
+      // Don't show guide text for second point - just hide and let user tap
+      // Auto-reset if user doesn't tap second point within 10 seconds
+    } else if (newPoints.length === 2) {
+      // Calculate height
+      const heightCm = calculateMeasureHeight(newPoints, canvas.height);
+      if (heightCm) {
+        setMeasuredHeightCm(heightCm);
+        // Auto-sync to form state
+        onFormStateChange(prev => ({ ...prev, tinggi: Math.round(heightCm) }));
+        // Don't show guide text overlay - just auto-reset for cleaner UI
+        
+        // Auto-reset after 2 seconds for next measurement
+        setTimeout(() => {
+          setMeasurePoints([]);
+          setMeasuredHeightCm(null);
+        }, 2000);
+      }
+    }
+  }, [isMeasureMode, measurePoints, calculateMeasureHeight, onFormStateChange, showToast]);
+  
+  // Handle mouse move for dragging markers
+  const handleMeasureMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (draggingPoint === null || !isMeasureMode) return;
     
     const canvas = measureCanvasRef.current;
     if (!canvas) return;
@@ -300,26 +521,32 @@ export const CameraView: React.FC<CameraViewProps> = ({
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
+    
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
     
-    const newPoints = [...measurePoints, { x, y }];
+    // Update the dragged point position
+    const newPoints = [...measurePoints];
+    newPoints[draggingPoint] = { x, y };
     setMeasurePoints(newPoints);
     
-    if (newPoints.length === 1) {
-      setMeasureGuideText('Sekarang, ketuk titik ujung pohon');
-    } else if (newPoints.length === 2) {
-      // Calculate height
+    // Recalculate height if we have 2 points
+    if (newPoints.length === 2) {
       const heightCm = calculateMeasureHeight(newPoints, canvas.height);
       if (heightCm) {
         setMeasuredHeightCm(heightCm);
-        setMeasureGuideText(`Tinggi: ${(heightCm / 100).toFixed(2)} m`);
-        // Auto-sync to form state
         onFormStateChange(prev => ({ ...prev, tinggi: Math.round(heightCm) }));
-        showToast(`Tinggi terukur: ${(heightCm / 100).toFixed(2)} m`, 'success');
       }
     }
-  }, [isMeasureMode, measurePoints, calculateMeasureHeight, onFormStateChange, showToast]);
+  }, [draggingPoint, isMeasureMode, measurePoints, calculateMeasureHeight, onFormStateChange]);
+  
+  // Handle mouse up to stop dragging
+  const handleMeasureMouseUp = useCallback(() => {
+    setDraggingPoint(null);
+  }, []);
+
+  // Video ref for camera - must be declared before useEffects that use it
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   // Draw measurement overlay
   useEffect(() => {
@@ -332,18 +559,26 @@ export const CameraView: React.FC<CameraViewProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     
-    // Set canvas size to match video
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
+    // Set canvas size to match video, with fallback
+    const videoWidth = video.videoWidth || 640;
+    const videoHeight = video.videoHeight || 480;
+    
+    // Only update dimensions if significantly different to avoid flickering
+    if (Math.abs(canvas.width - videoWidth) > 10 || Math.abs(canvas.height - videoHeight) > 10) {
+      canvas.width = videoWidth;
+      canvas.height = videoHeight;
+    }
     
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Draw grid lines (reference for stick)
+    // Draw grid lines (reference for stick) - using linePositionPercent as center
     const lineOffset = lineOffsetPercent / 100;
-    const y1 = canvas.height * (0.5 - lineOffset);
-    const y2 = canvas.height * (0.5 + lineOffset);
+    const lineCenter = linePositionPercent / 100;
+    const y1 = canvas.height * (lineCenter - lineOffset);
+    const y2 = canvas.height * (lineCenter + lineOffset);
     
+    // Draw reference lines with labels
     ctx.strokeStyle = '#FF3860';
     ctx.lineWidth = 4;
     ctx.beginPath();
@@ -353,21 +588,60 @@ export const CameraView: React.FC<CameraViewProps> = ({
     ctx.lineTo(canvas.width, y2);
     ctx.stroke();
     
-    // Draw stick height label
+    // Draw drag handles on lines (visible when measuring)
+    if (isMeasureMode) {
+      // Draw drag handle circles on lines
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.strokeStyle = '#FF3860';
+      ctx.lineWidth = 2;
+      
+      // Top line handle
+      ctx.beginPath();
+      ctx.arc(canvas.width - 50, y1, 12, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+      
+      // Bottom line handle
+      ctx.beginPath();
+      ctx.arc(canvas.width - 50, y2, 12, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+    }
+    
+    // Draw stick height label in center of lines
     ctx.fillStyle = 'white';
     ctx.font = 'bold 24px sans-serif';
     ctx.textAlign = 'right';
-    ctx.fillText(`${stickHeightMeters} m`, canvas.width - 20, y1 + (y2 - y1) / 2 + 10);
+    ctx.fillText(`${stickHeightMeters} m`, canvas.width - 60, y1 + (y2 - y1) / 2 + 10);
     
-    // Draw measurement points
+    // Draw measurement points with custom colors from settings
+    const getMarkerColor = (index: number): string => {
+      try {
+        if (index === 0) {
+          return localStorage.getItem('pixel-scale-marker-base') || '#00FF00';
+        } else {
+          return localStorage.getItem('pixel-scale-marker-tip') || '#FF0000';
+        }
+      } catch {
+        return index === 0 ? '#00FF00' : '#FF0000';
+      }
+    };
+    
     measurePoints.forEach((p, i) => {
+      const markerColor = getMarkerColor(i);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 16, 0, 2 * Math.PI);
-      ctx.fillStyle = i === 0 ? 'rgba(0,255,0,0.9)' : 'rgba(255,0,0,0.9)';
+      ctx.arc(p.x, p.y, 20, 0, 2 * Math.PI); // Larger marker (20px)
+      ctx.fillStyle = markerColor + 'E6'; // Add alpha for visibility
       ctx.fill();
       ctx.strokeStyle = 'white';
       ctx.lineWidth = 4;
       ctx.stroke();
+      
+      // Add inner dot for visibility
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 8, 0, 2 * Math.PI);
+      ctx.fillStyle = 'white';
+      ctx.fill();
     });
     
     // Draw line between points if we have 2 points
@@ -380,6 +654,95 @@ export const CameraView: React.FC<CameraViewProps> = ({
       ctx.stroke();
     }
   }, [isMeasureMode, measurePoints, lineOffsetPercent, stickHeightMeters]);
+
+// AI Height Debug Visualization Overlay (Fixed: removed duplicate)
+  useEffect(() => {
+    const canvas = debugCanvasRef.current;
+    if (!canvas || !showHeightDebug || !isHeightAiMode || !heightDebugResult) return;
+
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set canvas size to match video
+    const videoWidth = video.videoWidth;
+    const videoHeight = video.videoHeight;
+    canvas.width = videoWidth;
+    canvas.height = videoHeight;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, videoWidth, videoHeight);
+
+    const { vegetationMask, boundingBox, plantHeightPx, plantHeightCm } = heightDebugResult;
+
+    // Scale factor: detection is 160x160, scale to video dimensions
+    const scaleX = videoWidth / 160;
+    const scaleY = videoHeight / 160;
+
+    // 1. Draw vegetation mask (green semi-transparent)
+    if (vegetationMask) {
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(vegetationMask, 0, 0, videoWidth, videoHeight);
+      ctx.restore();
+    }
+
+    // 2. Draw bounding box (thick blue)
+    ctx.strokeStyle = '#00AAFF';
+    ctx.lineWidth = 4;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.strokeRect(
+      boundingBox.x * scaleX,
+      boundingBox.y * scaleY,
+      boundingBox.width * scaleX,
+      boundingBox.height * scaleY
+    );
+
+    // 3. Draw height measurement line (red, from bbox bottom to top)
+    const bboxTopY = boundingBox.y * scaleY;
+    const bboxBottomY = (boundingBox.y + boundingBox.height) * scaleY;
+    const bboxCenterX = (boundingBox.x + boundingBox.width / 2) * scaleX;
+
+    ctx.strokeStyle = '#FF4444';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(bboxCenterX, bboxTopY);
+    ctx.lineTo(bboxCenterX, bboxBottomY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 4. Draw height labels
+    ctx.fillStyle = '#FF4444';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      `${Math.round(plantHeightCm)} cm`,
+      bboxCenterX,
+      (bboxTopY + bboxBottomY) / 2
+    );
+
+    // 5. Debug info panel (top-left)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(10, 10, 220, 100);
+    
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`Height: ${Math.round(plantHeightCm)} cm`, 20, 25);
+    ctx.fillText(`Pixels: ${Math.round(plantHeightPx)} px`, 20, 45);
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#00AAFF';
+    ctx.fillText(`Bbox: ${Math.round(boundingBox.width)}x${Math.round(boundingBox.height)}`, 20, 65);
+    ctx.fillText(`@ ${videoWidth}x${videoHeight}`, 20, 82);
+
+  }, [showHeightDebug, isHeightAiMode, heightDebugResult, videoRef]);
+
   useEffect(() => {
     if (isHeightAiMode && heightAiSamples.length < 10) {
       setCalibrationActive(true);
@@ -398,7 +761,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setSampleIndicator(sampleNum);
     setTimeout(() => setSampleIndicator(null), 1500); // 1.5 detik
   }, []);
-  const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const boundingBoxCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -651,17 +1013,19 @@ export const CameraView: React.FC<CameraViewProps> = ({
   }, [heightAiRange]);
 
   const handleToggleHeightAiMode = useCallback(() => {
-    setIsHeightAiMode((prev) => {
-      const next = !prev;
-      showToast(next ? 'Mode Tinggi AI aktif.' : 'Mode Tinggi AI nonaktif.', 'info');
-      if (!next) {
-        setHeightAiEstimate(null);
-        heightAiBufferRef.current = [];
-      }
-      return next;
-    });
+    // Toggle between AI and slider mode
+    const nextMode = heightMode === 'ai' ? 'slider' : 'ai';
+    setHeightMode(nextMode);
+    showToast(nextMode === 'ai' ? 'Mode Tinggi AI aktif.' : 'Mode Tinggi AI nonaktif.', 'info');
+    if (nextMode !== 'ai') {
+      setHeightAiEstimate(null);
+      heightAiBufferRef.current = [];
+// Clear AI errors when switching modes
+      setOpencvLoadError(false);
+      setDetectionFailureReason(null);
+    }
     triggerHeightAiNotice();
-  }, [triggerHeightAiNotice, showToast]);
+  }, [heightMode, triggerHeightAiNotice, showToast]);
 
   const handleCaptureClick = useCallback(() => {
     const video = videoRef.current;
@@ -745,7 +1109,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           const derived = deriveRangeFromSamples(next);
           if (derived) {
             setHeightAiRange(derived);
-            setIsHeightAiMode(true);
+            setHeightMode('ai');
             showToast(`Rentang AI dikunci: ${derived.min}-${derived.max} cm`, 'success');
             showToast('Selamat, Anda sedang di mode AI.', 'success');
           }
@@ -753,6 +1117,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
         return next;
       });
     }
+    // Show analysis result briefly on capture
+    setShowCaptureAnalysis(true);
+    setTimeout(() => setShowCaptureAnalysis(false), 2500);
+    
     onCapture(canvas.toDataURL('image/jpeg', 0.85), livePlantHealth, thumbnailDataUrl, isHeightAiMode ? 'ai' : 'manual');
   }, [onCapture, formState, gps, entriesCount, showToast, livePlantHealth]);
 
@@ -801,11 +1169,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
           setHeightAiEstimate(null);
           (async () => {
             try {
-              // Pastikan OpenCV.js sudah dimuat
-              // @ts-ignore
-              if (!(window as any).cv || !(window as any).cv.Mat) {
-                await loadOpenCV();
+              // Pastikan OpenCV.js sudah dimuat - ENHANCED CHECK
+console.log('[AI Height] Analyzing frame, OpenCV ready:', !!(window.cv && window.cv.Mat));
+              // Check enhanced state
+              const loadState = (window as any).opencvLoadState as OpenCVLoadState || OpenCVLoadState.Idle;
+              console.log('[AI Height] OpenCV state:', loadState, 'ready:', isOpenCVReady());
+              if (loadState === OpenCVLoadState.Failed || !isOpenCVReady()) {
+                try {
+                  await loadOpenCV(5);
+                  console.log('[AI Height] OpenCV reload attempt complete');
+                  await new Promise(r => setTimeout(r, 800));
+                } catch (loadErr) {
+                  console.error('[AI Height] OpenCV load failed:', loadErr);
+                  setDetectionFailureReason('network');
+                  setHeightAiEstimate({ cm: 0, confidence: 0 });
+                  showToast('OpenCV load gagal - cek console/network. Mode manual?', 'error');
+                  return;
+                }
               }
+              if (!isOpenCVReady()) {
+                console.error('[AI Height] OpenCV not ready after load');
+                setDetectionFailureReason('opencv');
+                setOpencvLoadError(true);
+                setHeightAiEstimate({ cm: 0, confidence: 0 });
+                return;
+              }
+              console.log('[AI Height] ✅ OpenCV ready, proceeding...');
+
               // Buat canvas sementara dari imageData
               const tempCanvas = document.createElement('canvas');
               tempCanvas.width = imageData.width;
@@ -813,17 +1203,34 @@ export const CameraView: React.FC<CameraViewProps> = ({
               const tempCtx = tempCanvas.getContext('2d');
               if (tempCtx) tempCtx.putImageData(imageData, 0, 0);
               
-              // Hitung scaling factor karena canvas di-downscale ke ANALYSIS_SIZE (160px)
-              // Default pixelToCmRatio 0.04 dirancang untuk resolusi tinggi, bukan 160x160
-              // Kita perlu melakukan upscale agar rasio pixel-to-cm sesuai
-              const ANALYSIS_SIZE = 160; // Harus sama dengan nilai di atas
-              const scaleFactor = ANALYSIS_SIZE / 80; // Asumsi tanaman mengisi ~80px di canvas 160px = tinggi tanaman ~2m
-              const adjustedPixelToCmRatio = 0.04 * scaleFactor; // 0.04 * 2 = 0.08
+              const inputHeight = tempCanvas.height;
+              const calibratedRatio = calibratePixelToCmRatio(inputHeight);
               
+              console.log('[AI Height] Calibrated ratio:', calibratedRatio.toFixed(4), 'for', inputHeight + 'px height');
               const result = await detectPlantHeightOpenCV(tempCanvas, {
-                pixelToCmRatio: adjustedPixelToCmRatio
+                pixelToCmRatio: calibratedRatio
               });
+              console.log('[AI Height] Detection result:', {
+                cm: result.plantHeightCm,
+                px: result.plantHeightPx,
+                bbox: result.boundingBox,
+                contours: result.contourCount,
+                areas: result.contourAreas,
+                maskPx: result.maskPixelCount,
+                brightnessV: result.avgBrightnessV
+              });
+              setHeightDebugResult(result);
               const cm = result.plantHeightCm;
+              // Enhanced failure detection
+              if (result.avgBrightnessV !== undefined && result.avgBrightnessV < 0.3) {
+                setDetectionFailureReason('lowlight');
+              } else if (cm === 0) {
+                const noBbox = result.boundingBox.width === 0 || result.boundingBox.height === 0;
+                setDetectionFailureReason(noBbox ? 'noplan' : 'unknown');
+              } else {
+                setDetectionFailureReason(null);
+                setOpencvLoadError(false);
+              }
               // Jika tidak terdeteksi (tinggi 0), set confidence rendah
               const displayEstimate: HeightAiEstimate = {
                 cm: Math.round(cm),
@@ -842,8 +1249,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               setHeightAiEstimate({ cm: 0, confidence: 0 });
               // Log error minimal
               if (process.env.NODE_ENV !== 'production') {
-                // eslint-disable-next-line no-console
-                console.error('AI Height detection error:', err);
+console.error('AI Height detection error:', err);
               }
             }
           })();
@@ -876,7 +1282,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     // Aktifkan mode Tinggi AI otomatis saat analisis live pertama kali tersedia.
     hasAutoEnabledHeightAiRef.current = true;
-    setIsHeightAiMode(true);
+    setHeightMode('ai');
     triggerHeightAiNotice();
   }, [livePlantHealth, triggerHeightAiNotice]);
 
@@ -1139,21 +1545,44 @@ export const CameraView: React.FC<CameraViewProps> = ({
         className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ${cameraLoading ? 'opacity-0' : 'opacity-100'}`} 
       />
       
-      {/* Measurement Canvas Overlay */}
+      {/* Measurement Canvas Overlay - can be hidden to avoid obstruction */}
       {isMeasureMode && !cameraLoading && !cameraError && (
+        <>
+          {/* Clickable overlay for measurement - always present for interaction */}
+          <div
+            className="absolute inset-0 z-35"
+            style={{ cursor: measurePoints.length < 2 ? 'crosshair' : 'default' }}
+            onClick={handleMeasureCanvasClick}
+            onMouseMove={handleMeasureMouseMove}
+            onMouseUp={handleMeasureMouseUp}
+            onMouseLeave={handleMeasureMouseUp}
+            onTouchMove={handleMeasureMouseMove}
+            onTouchEnd={handleMeasureMouseUp}
+          />
+          {/* Visual overlay lines - can be toggled */}
+          {showMeasureOverlay && (
+            <canvas
+              ref={measureCanvasRef}
+              className="absolute inset-0 w-full h-full pointer-events-none z-36"
+              style={{ objectFit: 'cover', opacity: 0.8 }}
+            />
+          )}
+        </>
+      )}
+      {/* AI Height Debug Overlay */}
+      {showHeightDebug && isHeightAiMode && heightDebugResult && !cameraLoading && !cameraError && (
         <canvas
-          ref={measureCanvasRef}
-          onClick={handleMeasureCanvasClick}
-          className="absolute inset-0 w-full h-full z-10"
-          style={{ objectFit: 'cover', cursor: measurePoints.length < 2 ? 'crosshair' : 'default' }}
+          ref={debugCanvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none z-37"
+          style={{ objectFit: 'cover' }}
         />
       )}
       
-      {/* Measurement Guide Text */}
-      {isMeasureMode && measureGuideText && (
-        <div className="absolute top-1/3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
-          <div className="bg-black/70 backdrop-blur-sm px-4 py-2 rounded-xl border border-white/20">
-            <span className="text-white text-sm font-bold">{measureGuideText}</span>
+      {/* Measurement Guide Text - hidden now for cleaner UI */}
+      {isMeasureMode && false && measureGuideText && (
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 z-40 pointer-events-none">
+          <div className="bg-orange-500/90 backdrop-blur-sm px-6 py-3 rounded-2xl border-2 border-white shadow-lg">
+            <span className="text-white text-lg font-bold tracking-wide">{measureGuideText}</span>
           </div>
         </div>
       )}
@@ -1378,6 +1807,24 @@ export const CameraView: React.FC<CameraViewProps> = ({
               </div>
             )}
 
+            {/* Height Display - prominent like GPS accuracy */}
+            <div className={`backdrop-blur-sm px-2 py-1 rounded-lg border flex items-center gap-1.5 ${
+              heightMode === 'ai' 
+                ? 'bg-cyan-500/10 border-cyan-500/15'
+                : heightMode === 'pixel-scale'
+                  ? 'bg-orange-500/10 border-orange-500/15'
+                  : 'bg-emerald-500/10 border-emerald-500/15'
+            }`}>
+              <div className={`w-1.5 h-1.5 rounded-full ${
+                heightMode === 'ai' ? 'bg-cyan-400' : heightMode === 'pixel-scale' ? 'bg-orange-400' : 'bg-emerald-400'
+              }`} />
+              <span className={`text-[7px] font-black uppercase tracking-widest ${
+                heightMode === 'ai' ? 'text-cyan-200' : heightMode === 'pixel-scale' ? 'text-orange-200' : 'text-emerald-200'
+              }`}>
+                ±{formState.tinggi}cm
+              </span>
+            </div>
+
             {livePlantHealth && (
               <div className="bg-black/15 backdrop-blur-sm px-2 py-1 rounded-lg border border-white/5 flex items-center gap-2">
                 <span
@@ -1395,7 +1842,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               </div>
             )}
 
-            {isHeightAiMode && heightAiEstimate && heightAiEstimate.cm > 0 && (
+{isHeightAiMode && heightAiEstimate && heightAiEstimate.cm > 0 && (
               <div className="bg-emerald-500/20 backdrop-blur-sm px-2 py-1 rounded-lg border border-emerald-300/25 flex items-center gap-2">
                 <span className={`text-[7px] font-black uppercase tracking-widest ${heightAiEstimate.cm > 0 ? 'text-emerald-300' : 'text-red-300'}`}>
                   AI Tinggi
@@ -1405,8 +1852,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 </span>
               </div>
             )}
+            {isHeightAiMode && detectionFailureReason && (
+              <div className="bg-red-500/20 backdrop-blur-sm px-3 py-2 rounded-xl border border-red-400/30 flex items-center gap-2 text-sm animate-pulse">
+                <svg className="w-4 h-4 text-red-300 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+{detectionFailureReason === 'opencv' && '⚠️ OpenCV belum dimuat (perlu internet)'}
+                {detectionFailureReason === 'network' && '🌐 Koneksi internet gagal - cek proxy/VPN'}
+                {detectionFailureReason === 'lowlight' && '💡 Cahaya kurang - tambah pencahayaan'}
+                {detectionFailureReason === 'noplan' && '🌱 Tanaman tidak terdeteksi, coba atur posisi/cahaya'}
+                {detectionFailureReason === 'unknown' && '❓ Deteksi gagal, coba lagi'}
+              </div>
+            )}
+            {isHeightAiMode && (
+              <button
+                onClick={() => setShowHeightDebug(!showHeightDebug)}
+                className={`px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all ${
+                  showHeightDebug 
+                    ? 'bg-purple-500/60 border-purple-400 text-purple-100' 
+                    : 'bg-black/30 border-white/20 text-white/70'
+                }`}
+                title={showHeightDebug ? 'Sembunyikan debug mask/bbox' : 'Tampilkan debug mask/bbox AI height'}
+              >
+                {showHeightDebug ? 'Debug: ON' : 'Debug'}
+              </button>
+            )}
 
-            {isHeightAiMode && (!heightAiEstimate || heightAiEstimate.cm === 0) && (
+            {isHeightAiMode && (!heightAiEstimate || heightAiEstimate.cm === 0) && !detectionFailureReason && (
               <div className="bg-amber-500/20 backdrop-blur-sm px-2 py-1 rounded-lg border border-amber-300/25 flex items-center gap-2">
                 <span className="text-[7px] font-black text-amber-200 uppercase tracking-widest">AI Tinggi</span>
                 <span className="text-[7px] font-bold text-amber-200">: Mengukur...</span>
@@ -1419,6 +1891,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 <span className="text-[7px] font-bold text-red-200/70">: ---</span>
               </div>
             )}
+
 
             {isMeasureMode && (
               <div className="bg-black/15 backdrop-blur-sm px-2 py-1 rounded-lg border border-orange-300/20 flex items-center gap-2">
@@ -1438,9 +1911,26 @@ export const CameraView: React.FC<CameraViewProps> = ({
           <div className="mx-auto w-full max-w-[560px] bg-black/14 backdrop-blur-md rounded-[1.1rem] sm:rounded-[1.25rem] border border-white/5 p-2 sm:p-2.5 flex flex-col gap-2 shadow-[0_6px_16px_rgba(0,0,0,0.12)]">
             <div className="flex justify-between items-center px-1.5">
               <div className="flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                <button
+                  onClick={() => setHeightControlsCollapsed(!heightControlsCollapsed)}
+                  className="p-1 rounded hover:bg-white/10 transition-colors"
+                  title={heightControlsCollapsed ? 'Tampilkan kontrol tinggi' : 'Sembunyikan kontrol tinggi'}
+                >
+                  <svg className="w-4 h-4 text-white/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    {heightControlsCollapsed ? (
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                    ) : (
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    )}
+                  </svg>
+                </button>
+                <div className={`w-1.5 h-1.5 rounded-full ${
+                  heightMode === 'ai' ? 'bg-cyan-400' :
+                  heightMode === 'pixel-scale' ? 'bg-orange-400' :
+                  'bg-emerald-400'
+                }`} />
                 <span className="text-[9px] font-black text-white uppercase tracking-wider">
-                  {isHeightAiMode ? 'Tinggi AI Aktif' : 'Pengaturan Tinggi'}
+                  {heightMode === 'ai' ? 'Tinggi AI' : heightMode === 'pixel-scale' ? 'Ukur Tinggi' : 'Pengaturan Tinggi'}
                 </span>
               </div>
               <span className="text-[10px] sm:text-xs font-black text-white bg-emerald-500/65 px-2.5 sm:px-3 py-1 rounded-xl border border-emerald-300/20">
@@ -1448,6 +1938,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
               </span>
             </div>
             
+            {!heightControlsCollapsed && (
+              <>
             <div className="relative px-1.5 py-1.5">
               <input 
                 type="range" min={HEIGHT_MIN_CM} max={HEIGHT_MAX_CM} value={formState.tinggi} 
@@ -1463,71 +1955,79 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
               <div className="mt-1.5 flex items-center justify-between gap-1.5">
                 <div className="flex items-center gap-1.5">
-                  {!isHeightAiMode && !isMeasureMode && (
-                    <>
-                      <button
-                        onClick={handleToggleHeightAiMode}
-                        className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-black/20 border-white/15 text-white/80"
-                        title="Toggle mode Tinggi AI"
-                      >
-                        AI Tinggi
-                      </button>
-
-                      <button
-                        onClick={handleToggleMeasureMode}
-                        className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-black/20 border-white/15 text-white/80"
-                        title="Mode Ukur Tinggi Manual"
-                      >
-                        Ukur
-                      </button>
-                    </>
-                  )}
-
-                  {isHeightAiMode && (
-                    <button
-                      onClick={handleToggleHeightAiMode}
-                      className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-cyan-500/20 border-cyan-300/35 text-cyan-100"
-                      title="Matikan mode Tinggi AI"
-                    >
-                      AI ON ✓
-                    </button>
-                  )}
-
+                  {/* Toggle overlay visibility for pixel scale mode - addresses obstruction issue */}
                   {isMeasureMode && (
                     <button
-                      onClick={handleToggleMeasureMode}
-                      className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-orange-500/20 border-orange-300/35 text-orange-100"
-                      title="Matikan mode Ukur"
+                      onClick={() => setShowMeasureOverlay(!showMeasureOverlay)}
+                      className={`px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all ${
+                        showMeasureOverlay 
+                          ? 'bg-orange-500/40 border-orange-400/40 text-orange-200' 
+                          : 'bg-black/20 border-white/15 text-white/80'
+                      }`}
+                      title={showMeasureOverlay ? 'Sembunyikan garis pengukuran' : 'Tampilkan garis pengukuran'}
                     >
-                      Ukur ON ✓
+                      {showMeasureOverlay ? 'Garis: ON' : 'Garis: OFF'}
                     </button>
-                  )}
-
-                  {(isHeightAiMode || isMeasureMode) && (
+                    )}
+                    
+                    {/* Quick stick height adjustment - shown when in measure mode */}
+                    {isMeasureMode && (
                     <button
                       onClick={() => {
-                        if (isHeightAiMode) handleToggleHeightAiMode();
-                        if (isMeasureMode) handleToggleMeasureMode();
+                        const newHeight = stickHeightMeters >= 3 ? 1 : stickHeightMeters + 0.5;
+                        setStickHeightMeters(newHeight);
+                        localStorage.setItem('pixel-scale-stick-height', newHeight.toString());
+                        if (navigator.vibrate) navigator.vibrate(30);
                       }}
                       className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-black/20 border-white/15 text-white/80"
-                      title="Kembali ke mode Manual"
+                      title={`Tinggi tongkat: ${stickHeightMeters}m - klik untuk ubah`}
                     >
-                      Manual
+                      📏{stickHeightMeters}m
                     </button>
-                  )}
+                    )}
+                    
+                    {/* Quick line offset adjustment - shown when in measure mode */}
+                    {isMeasureMode && (
+                    <button
+                      onClick={() => {
+                        const newOffset = lineOffsetPercent >= 30 ? 10 : lineOffsetPercent + 5;
+                        setLineOffsetPercent(newOffset);
+                        localStorage.setItem('pixel-scale-line-offset', newOffset.toString());
+                        if (navigator.vibrate) navigator.vibrate(30);
+                      }}
+                      className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-black/20 border-white/15 text-white/80"
+                      title={`Garis: ${lineOffsetPercent}% - klik untuk ubah`}
+                    >
+                      ‖{lineOffsetPercent}%
+                    </button>
+                    )}
+                    
+                    {/* Line position adjustment - move lines up/down */}
+                    {isMeasureMode && (
+                    <button
+                      onClick={() => {
+                        const newPos = linePositionPercent >= 80 ? 20 : linePositionPercent + 10;
+                        setLinePositionPercent(newPos);
+                        localStorage.setItem('pixel-scale-line-position', newPos.toString());
+                        if (navigator.vibrate) navigator.vibrate(30);
+                      }}
+                      className="px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all bg-black/20 border-white/15 text-white/80"
+                      title={`Posisi garis: ${linePositionPercent}%`}
+                    >
+                      ↕{linePositionPercent}%
+                    </button>
+                    )}
+                  </div>
 
-                  <button
-                    onClick={openHeightAiPopup}
-                    className="px-2 py-1 rounded-md border border-white/15 bg-black/20 text-white/80 text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all"
-                    title="Buka popup kalibrasi Tinggi AI"
-                  >
-                    Panduan
-                  </button>
-                </div>
-
+                {/* Show status text based on mode */}
                 {isHeightAiMode && (
                   <span className="text-[7px] font-black text-cyan-100 uppercase tracking-wide">
                     {heightAiEstimate ? `Estimasi ${heightAiEstimate.cm}cm (${heightAiEstimate.confidence}%)` : 'Mengukur...'}
+                  </span>
+                )}
+                {isMeasureMode && false && measureGuideText && (
+                  <span className="text-[7px] font-black text-orange-100 uppercase tracking-wide">
+                    {measureGuideText}
                   </span>
                 )}
               </div>
@@ -1544,6 +2044,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 </p>
               )}
             </div>
+            </>
+            )}
 
           </div>
 
@@ -1661,8 +2163,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.5)_100%)]" />
       
-      {/* Live Health Comment -muncul 1-2 detik saat analisis HCV diperbarui */}
-      <LiveHealthComment healthResult={livePlantHealth} duration={2000} />
+      {/* Live Health Comment -muncul hanya saat capture */}
+      {showCaptureAnalysis && livePlantHealth && (
+        <LiveHealthComment healthResult={livePlantHealth} duration={2500} />
+      )}
     </div>
   );
 };

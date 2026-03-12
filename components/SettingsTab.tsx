@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { getAllEntries } from '../services/dbService';
 import { exportToCSV, exportToZIP, exportToKMZ } from '../services/exportService';
 
@@ -9,8 +9,24 @@ interface SettingsTabProps {
   onClearData: () => void;
 }
 
+const HEIGHT_MODE_KEY = 'camera-montana-height-mode-v1';
+
 export const SettingsTab: React.FC<SettingsTabProps> = ({ appsScriptUrl, onAppsScriptUrlChange, onClearData }) => {
   const isSecure = window.isSecureContext;
+  // Pengaturan mode pengukuran tinggi
+  const [heightMode, setHeightMode] = useState<'ai' | 'slider' | 'pixel-scale'>(() => {
+    try {
+      const saved = window.localStorage.getItem(HEIGHT_MODE_KEY);
+      if (saved === 'ai' || saved === 'slider' || saved === 'pixel-scale') return saved;
+    } catch {}
+    return 'slider';
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(HEIGHT_MODE_KEY, heightMode);
+    } catch {}
+  }, [heightMode]);
   const [exportState, setExportState] = React.useState<{
     mode: 'csv' | 'kmz' | 'zip' | null;
     current: number;
@@ -62,6 +78,36 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({ appsScriptUrl, onAppsS
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      {/* Height Settings Section */}
+      <section className="space-y-4">
+        <div className="flex items-center gap-2 px-1">
+          <div className="w-2 h-2 rounded-full bg-orange-500" />
+          <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Pengaturan Tinggi Tanaman</h4>
+        </div>
+        <div className="space-y-3 bg-slate-50 p-5 rounded-3xl border border-slate-100">
+          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-1">Metode Pengukuran Tinggi</label>
+          <div className="flex gap-2 mt-2">
+            <button
+              className={`px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-wide transition-all ${heightMode === 'ai' ? 'bg-cyan-500/20 border-cyan-300/35 text-cyan-900' : 'bg-white border-slate-200 text-slate-700'}`}
+              onClick={() => setHeightMode('ai')}
+              type="button"
+            ><svg className="w-4 h-4 inline-block mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>AI</button>
+            <button
+              className={`px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-wide transition-all ${heightMode === 'slider' ? 'bg-emerald-500/20 border-emerald-300/35 text-emerald-900' : 'bg-white border-slate-200 text-slate-700'}`}
+              onClick={() => setHeightMode('slider')}
+              type="button"
+            ><svg className="w-4 h-4 inline-block mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>Slider</button>
+            <button
+              className={`px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-wide transition-all ${heightMode === 'pixel-scale' ? 'bg-orange-500/20 border-orange-300/35 text-orange-900' : 'bg-white border-slate-200 text-slate-700'}`}
+              onClick={() => setHeightMode('pixel-scale')}
+              type="button"
+            ><svg className="w-4 h-4 inline-block mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 6H3a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z"/><line x1="6" y1="12" x2="6" y2="16"/><line x1="10" y1="12" x2="10" y2="16"/><line x1="14" y1="12" x2="14" y2="16"/></svg>Pixel Scale</button>
+          </div>
+          <p className="mt-2 text-[9px] text-slate-500">Pilihan ini akan mempengaruhi tampilan panel kamera dan metode pengukuran tinggi yang digunakan.</p>
+        </div>
+      </section>
+
+      {/* Cloud Sync Section */}
       <section className="space-y-4">
         <div className="flex items-center gap-2 px-1">
           <div className="w-2 h-2 rounded-full bg-blue-500" />
@@ -79,6 +125,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({ appsScriptUrl, onAppsS
         </div>
       </section>
 
+      {/* Export Section */}
       <section className="space-y-4">
         <div className="flex items-center gap-2 px-1">
           <div className="w-2 h-2 rounded-full bg-emerald-500" />
@@ -116,6 +163,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({ appsScriptUrl, onAppsS
         </div>
       </section>
 
+      {/* System Info Section */}
       <section className="space-y-4">
         <div className="flex items-center gap-2 px-1">
           <div className="w-2 h-2 rounded-full bg-slate-400" />
@@ -138,6 +186,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({ appsScriptUrl, onAppsS
         </div>
       </section>
 
+      {/* Clear Data Section */}
       <section className="pt-8 mt-8 border-t border-slate-100">
         <button onClick={onClearData} className="w-full p-5 bg-red-50 text-red-600 rounded-3xl text-[10px] font-black uppercase tracking-[0.2em] active:scale-[0.98] transition-all shadow-sm ring-1 ring-red-100">
           Reset Semua Data Lokal

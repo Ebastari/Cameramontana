@@ -8,6 +8,7 @@ import { uploadToAppsScript } from './services/uploadService';
 import { watchGpsLocation } from './services/gpsService';
 import { PlantEntry, GpsLocation, ToastState, FormState } from './types';
 import { Toast } from './components/Toast';
+import SyncStatusIndicator from './components/SyncStatusIndicator';
 import {
   getEntryStats,
   getPendingEntries,
@@ -16,8 +17,10 @@ import {
   saveEntry,
   updateEntrySyncMeta,
   clearAllEntries,
+  addToSyncQueue,
 } from './services/dbService';
 import { checkInternetConnection } from './services/networkService';
+import { initSync, triggerSync } from './services/syncService';
 import { generateHealthDescription, type PlantHealthResult } from './ecology/plantHealth';
 
 const RETRY_BASE_DELAY_MS = 15000;
@@ -245,6 +248,13 @@ const App: React.FC = () => {
     } catch (err) {
       console.error('Gagal memuat database:', err);
     }
+  }, []);
+
+  // Initialize sync service on app start
+  useEffect(() => {
+    initSync().catch((err) => {
+      console.error('Failed to initialize sync:', err);
+    });
   }, []);
 
   useEffect(() => {
@@ -612,11 +622,26 @@ const App: React.FC = () => {
         ...finalEntry,
         foto: finalEntry.thumbnail || finalEntry.foto,
       };
-      
+
+      // Save entry to local database
       await saveEntry(finalEntry);
-      setEntries((prev) => [previewEntry, ...prev].slice(0, MAX_ACTIVE_ENTRIES));
-      setTotalEntriesCount((prev) => prev + 1);
-      setPendingEntriesCount((prev) => prev + 1);
+      
+      // Check if online and add to sync queue accordingly
+      const isOnlineNow = await checkInternetConnection();
+      if (isOnlineNow) {
+        // Online: try to upload immediately
+        setEntries((prev) => [previewEntry, ...prev].slice(0, MAX_ACTIVE_ENTRIES));
+        setTotalEntriesCount((prev) => prev + 1);
+        setPendingEntriesCount((prev) => prev + 1);
+      } else {
+        // Offline: add to sync queue
+        await addToSyncQueue(finalEntry, 'create');
+        finalEntry.uploaded = false;
+        setEntries((prev) => [previewEntry, ...prev].slice(0, MAX_ACTIVE_ENTRIES));
+        setTotalEntriesCount((prev) => prev + 1);
+        setPendingEntriesCount((prev) => prev + 1);
+        showToast('Data disimpan offline. Akan disinkronkan saat koneksi tersedia.', 'info', 3000);
+      }
 
       const fileName = `TREE_${formState.jenis.toUpperCase()}_${id}.jpg`;
 

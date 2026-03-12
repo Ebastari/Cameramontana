@@ -8,6 +8,31 @@ export interface PlantHeightDetectionResult {
   plantHeightPx: number;
   plantHeightCm: number;
   outputCanvas: HTMLCanvasElement;
+  avgBrightnessV?: number; // New: for lighting debug
+}
+
+export function calibratePixelToCmRatio(inputHeightPx: number): number {
+  // Dynamic calibration: Assume average plant height 200cm fills ~80px on analysis canvas
+  // Base ratio 0.04 calibrated for full-res input where plant fills ~500px for 200cm
+  const avgPlantPx = 80; // Expected px for avg plant on 160px input
+  const avgPlantCm = 200;
+  const baseRatio = 0.04; // Original for high-res
+  const scaleFactor = inputHeightPx / 500; // Normalize to expected full-res
+  const calibratedRatio = avgPlantCm / avgPlantPx * scaleFactor;
+  console.log(`[Calibrate] Input ${inputHeightPx}px → ratio ${calibratedRatio.toFixed(4)} (base ${baseRatio}, scale ${scaleFactor.toFixed(2)})`);
+  return calibratedRatio;
+}
+
+export interface PlantHeightDetectionResult {
+  vegetationMask: HTMLCanvasElement;
+  boundingBox: { x: number; y: number; width: number; height: number };
+  plantHeightPx: number;
+  plantHeightCm: number;
+  outputCanvas: HTMLCanvasElement;
+  avgBrightnessV?: number;
+  maskPixelCount: number; // New: total white pixels in mask
+  contourCount: number; // New: total contours found
+  contourAreas: number[]; // New: areas of all contours > MIN_AREA
 }
 
 export async function detectPlantHeightOpenCV(
@@ -22,7 +47,9 @@ export async function detectPlantHeightOpenCV(
   // @ts-ignore
   const cv = (window as any).cv;
   if (!cv) throw new Error('OpenCV.js belum dimuat');
-  const pixelToCmRatio = options.pixelToCmRatio ?? 0.04;
+  const inputHeight = imageElement.height || 160;
+  const pixelToCmRatio = options.pixelToCmRatio ?? calibratePixelToCmRatio(inputHeight);
+  console.log(`[PlantDetect] HSV [${options.hsvLower ?? '[20,30,30]'} → ${options.hsvUpper ?? '[100,255,255]'}], ratio ${pixelToCmRatio.toFixed(4)} for ${inputHeight}px input`);
   // Perlebar threshold HSV agar lebih toleran (hijau kekuningan sampai kebiruan)
   const hsvLower = options.hsvLower ?? [20, 30, 30];
   const hsvUpper = options.hsvUpper ?? [100, 255, 255];
@@ -49,21 +76,68 @@ export async function detectPlantHeightOpenCV(
   const hierarchy = new cv.Mat();
   cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-  // 5. Ambil kontur terbesar dengan area minimum (abaikan noise)
+// 5. Ambil kontur terbesar dengan area minimum (abaikan noise) + full logging
+  const validContours: {cnt: any, area: number}[] = [];
   let maxContour = null;
   let maxArea = 0;
-  const MIN_AREA = 200; // px, sesuaikan jika perlu
+  const MIN_AREA = 100;
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i);
     const area = cv.contourArea(cnt);
-    if (area > maxArea && area >= MIN_AREA) {
-      maxArea = area;
-      maxContour = cnt;
+    if (area >= MIN_AREA) {
+      validContours.push({cnt, area});
+      if (area > maxArea) {
+        maxArea = area;
+        maxContour = cnt;
+      }
     }
+  }
+  console.log(`[PlantDetect] HSV [${hsvLower.join(',')}→${hsvUpper.join(',')}] found ${contours.size()} contours (${validContours.length} >=${MIN_AREA}), areas: [${validContours.map(c => Math.round(c.area)).join(', ')}], max ${Math.round(maxArea)}`);
+
+  // Mask pixel count (white pixels)
+  let maskPixelCount = 0;
+  if (mask && mask.data) {
+    for (let j = 0; j < mask.data.length; j++) {
+      if (mask.data[j] > 0) maskPixelCount++;
+    }
+  }
+  console.log(`[PlantDetect] Mask white pixels: ${maskPixelCount} / ${mask.rows * mask.cols} (${((maskPixelCount / (mask.rows * mask.cols)) * 100).toFixed(1)}%)`);
+
+// Lighting check: avg V from HSV (0-1 scale)
+  let totalV = 0;
+  let pixelCountV = 0;
+  const vChannel = hsv.data8U.slice(hsv.cols * 2); // V channel (last)
+  for (let i = 0; i < vChannel.length; i++) {
+    totalV += vChannel[i];
+    pixelCountV++;
+  }
+  const avgV = pixelCountV > 0 ? (totalV / pixelCountV) / 255 : 0;
+  console.log('[PlantDetect] Avg brightness V:', avgV.toFixed(3), pixelCountV + 'px');
+
+  if (avgV < 0.3) {
+    console.warn('[PlantDetect] Low lighting (V=' + avgV.toFixed(3) + '), skipping detection');
+    // Return zero detection
+    const emptyResult = {
+      vegetationMask: document.createElement('canvas'),
+      boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+      plantHeightPx: 0,
+      plantHeightCm: 0,
+      outputCanvas: document.createElement('canvas'),
+      avgBrightnessV: avgV
+    };
+    // Cleanup first
+    src.delete(); hsv.delete(); lower.delete(); upper.delete(); mask.delete(); kernel.delete(); contours.delete(); hierarchy.delete();
+    return emptyResult as PlantHeightDetectionResult;
+  }
+
+  // Debug logs (promoted to log)
+  console.log('[PlantDetect] Contours:', contours.size(), 'maxArea:', Math.round(maxArea), 'MIN_AREA:', MIN_AREA);
+  if (maxArea === 0) {
+    console.log('[PlantDetect] No suitable contours (all < MIN_AREA)');
   }
 
   // 6. Bounding box & tinggi
-  let boundingBox = { x: 0, y: 0, width: 0, height: 0 };
+let boundingBox = { x: 0, y: 0, width: 0, height: 0 };
   let plantHeightPx = 0;
   if (maxContour) {
     const rect = cv.boundingRect(maxContour);
@@ -71,6 +145,9 @@ export async function detectPlantHeightOpenCV(
     plantHeightPx = rect.height;
   }
   const plantHeightCm = plantHeightPx * pixelToCmRatio;
+
+  // Debug logs
+  console.log('[PlantDetect] Final:', plantHeightPx + 'px -> ' + plantHeightCm.toFixed(1) + 'cm (ratio=' + pixelToCmRatio.toFixed(4) + '), bbox:', boundingBox);
 
   // 7. Gambar hasil
   const output = src.clone();
@@ -106,6 +183,10 @@ export async function detectPlantHeightOpenCV(
     plantHeightPx,
     plantHeightCm,
     outputCanvas,
+    avgBrightnessV: avgV,
+    maskPixelCount,
+    contourCount: validContours.length,
+    contourAreas: validContours.map(c => c.area),
   };
 }
 /**
@@ -200,30 +281,112 @@ const DEFAULT_OPTIONS: Required<PlantDetectionOptions> = {
 /**
  * Load OpenCV.js dynamically
  */
-export const loadOpenCV = (): Promise<void> => {
+export enum OpenCVLoadState {
+  Idle = 'idle',
+  Loading = 'loading',
+  Ready = 'ready',
+  Failed = 'failed'
+}
+
+let currentLoadState = OpenCVLoadState.Idle;
+(window as any).opencvLoadState = currentLoadState;
+
+export const loadOpenCV = (maxRetries = 5): Promise<void> => {
   return new Promise((resolve, reject) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cv = (window as any).cv;
-    if (typeof cv !== 'undefined') {
+    const updateState = (state: OpenCVLoadState, attempt?: number) => {
+      currentLoadState = state;
+      (window as any).opencvLoadState = state;
+      console.log(`[OpenCV] State: ${state}${attempt ? ` (attempt ${attempt}/${maxRetries})` : ''}`);
+    };
+
+    if (isOpenCVReady()) {
+      updateState(OpenCVLoadState.Ready);
       resolve();
       return;
     }
 
-    const script = document.createElement('script');
-    script.src = 'https://docs.opencv.org/4.8.0/opencv.js';
-    script.onload = () => {
-      // Wait for OpenCV to initialize
-      const checkReady = setInterval(() => {
-        const cvCheck = (window as any).cv;
-        if (typeof cvCheck !== 'undefined' && cvCheck.Mat) {
-          clearInterval(checkReady);
+    if (currentLoadState === OpenCVLoadState.Loading) {
+      // Already loading, wait
+      const poller = setInterval(() => {
+        if (isOpenCVReady()) {
+          clearInterval(poller);
+          updateState(OpenCVLoadState.Ready);
           resolve();
         }
-      }, 100);
+      }, 200);
+      setTimeout(() => clearInterval(poller), 15000);
+      return;
+    }
+
+    let retries = 0;
+    updateState(OpenCVLoadState.Loading, retries + 1);
+
+    const attemptLoad = () => {
+      retries++;
+      updateState(OpenCVLoadState.Loading, retries);
+
+      const script = document.createElement('script');
+      // Try self-host first if exists
+      if (document.querySelector('script[src*=\"opencv.js\"]') === null && '/opencv.js' in window.location) {
+        script.src = '/opencv.js';
+        console.log('[OpenCV] Trying self-hosted /opencv.js');
+      } else {
+        script.src = 'https://docs.opencv.org/4.8.0/opencv.js';
+        console.log('[OpenCV] Loading CDN');
+      }
+
+      script.onload = () => {
+        console.log('[OpenCV] Script loaded, waiting for onRuntimeInitialized...');
+        const timeout = setTimeout(() => {
+          console.warn('[OpenCV] Init timeout');
+          if (retries < maxRetries) {
+            attemptLoad();
+          } else {
+            updateState(OpenCVLoadState.Failed);
+            reject(new Error('OpenCV init timeout after retries'));
+          }
+        }, 12000);
+
+        const checkReady = setInterval(() => {
+          if (isOpenCVReady()) {
+            clearInterval(checkReady);
+            clearTimeout(timeout);
+            updateState(OpenCVLoadState.Ready);
+            console.log('[OpenCV] ✅ Fully ready - Mat available');
+            resolve();
+            return;
+          }
+        }, 150);
+      };
+
+      script.onerror = (e) => {
+        console.error('[OpenCV] ❌ Load error:', e);
+        if (retries < maxRetries) {
+          console.log(`[OpenCV] Retrying in 3s... (${maxRetries - retries} left)`);
+          setTimeout(attemptLoad, 3000);
+        } else {
+          updateState(OpenCVLoadState.Failed);
+          reject(new Error('OpenCV load failed after max retries - check firewall/VPN'));
+        }
+      };
+
+      // Avoid duplicate scripts
+      if (document.querySelector(`script[src=\"${script.src}\"]`) === null) {
+        document.head.appendChild(script);
+      } else {
+        // Already loading similar, retry check
+        setTimeout(attemptLoad, 2000);
+      }
     };
-    script.onerror = () => reject(new Error('Failed to load OpenCV.js'));
-    document.head.appendChild(script);
+
+    attemptLoad();
   });
+};
+
+export const isOpenCVReady = (): boolean => {
+  // @ts-ignore
+  const cv = (window as any).cv;
+  return typeof cv !== 'undefined' && cv.Mat;
 };
 
 /**
